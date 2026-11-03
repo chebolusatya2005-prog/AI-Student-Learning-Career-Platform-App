@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --bg-sidebar: #111C35;
+    --bg-main: #F4F7FB;
+    --bg-nav: #FFFFFF;
+    --bg-card: #FFFFFF;
+    --bg-card-muted: #F1F5F9;
+    --text-primary: #172033;
+    --text-secondary: #64748B;
+    --text-muted: #94A3B8;
+    --border-color: #E2E8F0;
+    --border-subtle: #F1F5F9;
+    --accent-primary: #3578D4;
+    --accent-hover: #2B64B8;
+    --accent-secondary: #0D9488;
+  }
+
+  .dark {
+    --bg-sidebar: #111C35;
+    --bg-main: #0B1120;
+    --bg-nav: #111827;
+    --bg-card: #172033;
+    --bg-card-muted: #1E293B;
+    --text-primary: #F8FAFC;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+    --border-color: #273449;
+    --border-subtle: #1E293B;
+    --accent-primary: #3578D4;
+    --accent-hover: #4C8CE4;
+    --accent-secondary: #2DD4BF;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Custom SaaS Theme Utility Classes */
+.bg-app-sidebar {
+  background-color: var(--bg-sidebar);
+}
+.bg-app-main {
+  background-color: var(--bg-main);
+}
+.bg-app-nav {
+  background-color: var(--bg-nav);
+}
+.bg-app-card {
+  background-color: var(--bg-card);
+}
+.bg-app-card-muted {
+  background-color: var(--bg-card-muted);
+}
+.border-app {
+  border-color: var(--border-color);
+}
+.text-app-primary {
+  color: var(--text-primary);
+}
+.text-app-secondary {
+  color: var(--text-secondary);
+}
+.text-app-muted {
+  color: var(--text-muted);
+}
+.text-app-accent {
+  color: var(--accent-primary);
+}
+
+/* Custom sleek scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}

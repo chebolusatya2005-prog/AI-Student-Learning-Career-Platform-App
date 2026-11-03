@@ -1,0 +1,6 @@
+{
+  "name": "AI Student Learning & Career Success Platform",
+  "description": "A modern, professional platform empowering students with personalized learning pathways, practice workflows, performance insights, and career readiness.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

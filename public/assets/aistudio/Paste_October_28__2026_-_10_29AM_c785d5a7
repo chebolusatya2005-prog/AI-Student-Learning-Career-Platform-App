@@ -1,0 +1,605 @@
+# COMPLETE PHASE 1 APPLICATION AUDIT
+## AI Student Learning & Career Success Platform
+
+Act as a Senior Full-Stack Engineer, Supabase Database Architect, Application Security Auditor, QA Engineer, AI Chatbot Evaluator, and Technical Project Reviewer.
+
+Your task is to perform a comprehensive, evidence-based audit of my existing **AI Student Learning & Career Success Platform** built using Google AI Studio and Supabase.
+
+I am a beginner, so your final report must be clear, detailed, honest, and understandable to someone preparing to explain this project in a college presentation or project viva.
+
+## 1. CRITICAL RULE: AUDIT FIRST, DO NOT MODIFY
+
+Before making any changes, inspect the actual existing application, source code, configuration, database schema, authentication flow, role-based dashboards, AI integration, and available test evidence.
+
+For this first audit, operate in READ-ONLY mode.
+
+DO NOT:
+- Modify, rewrite, delete, or create application files.
+- Change database tables, columns, records, assignments, or relationships.
+- Change Supabase Row Level Security (RLS) policies or database permissions.
+- Disable email confirmation or other authentication protections.
+- Change environment variables, API keys, secrets, or Supabase configuration.
+- Insert synthetic records or create dummy users to make tests pass.
+- Delete or modify existing student-trainer assignments.
+- Expose service-role keys, passwords, private tokens, or other secrets.
+- Claim a test passed unless it was actually executed or supported by reliable evidence.
+- Assume a feature works merely because its UI is visible.
+- Assume a feature is broken merely because no test has been performed.
+
+If a check requires a live operation or permission change, report what is needed and wait for explicit approval.
+
+Inspect the current project before suggesting fixes. Do not restart or rebuild already completed work.
+
+## 2. PROJECT CONTEXT AND KNOWN IMPLEMENTATION
+
+Use the following information as starting context, not as proof that the implementation is correct. Verify everything against the actual application.
+
+### Technology and architecture
+- Google AI Studio is used for application development and preview.
+- Supabase is used for authentication, database storage, and role-related data access.
+- The application has Admin, Trainer, and Student roles.
+- The platform includes student academic analytics and an AI chatbot.
+- The application uses a dataset containing 500 student-learning records.
+- The application includes student-trainer assignment management.
+- Some learning and career-readiness modules are explicitly scheduled for a future development phase.
+
+### Known Supabase tables
+The following tables have been observed:
+- public.users
+- public.students
+- public.student_learning_data
+- public.student_progress
+
+A trainers table and a trainer-student assignment table have also been used or inspected during earlier work. Verify their current existence, exact names, columns, constraints, foreign keys, indexes, grants, and RLS policies rather than assuming their current state.
+
+Do not create additional tables during this audit.
+
+### Known dataset
+The 500 records were imported into public.student_learning_data.
+
+Previously verified sample records include:
+
+Student: Teja
+- Student ID: 11391
+- Readiness score: 76.8
+- Risk level: Low
+- Placement readiness: Yes
+- Recommended topic: Logic Puzzles & Patterns
+- Course: Open University - AAA
+- Batch: 2013J
+
+Student: Yaswanth
+- Student ID: 28400
+- Readiness score: 66.1
+- Risk level: Low
+- Placement readiness: No / Developing Skills, according to the application's displayed representation
+- Recommended topic: Numerical Reasoning Drills
+- Course: Open University - AAA
+- Batch: 2013J
+
+These are reference values for checking the corresponding records, not permission to hardcode these values into the application.
+
+### Known progress state
+During the previous inspection, public.student_progress contained zero records and had these observed columns:
+- id
+- student_id
+- course_id
+- assessment_id
+- score
+- completion_percentage
+- status
+- last_activity_at
+
+The Student Dashboard displayed a message indicating no completed submissions were found. No exercise-start or practice-submission button was visible in the tested Student Dashboard.
+
+Verify the current state. Determine whether the missing practice workflow is an expected Phase 1 limitation, an incomplete feature, or a defect relative to the application's documented requirements.
+
+### Known assignment-management work
+The Admin Dashboard includes an Assignments tab implemented in the existing AdminDashboard component.
+
+Previously observed functionality includes:
+- Active assignment counters.
+- Trainer and student selection dropdowns.
+- One-primary-trainer-per-student validation.
+- Active assignment listing and search.
+- Two-step unassignment confirmation.
+- Supabase-backed assignment data.
+
+Previously, the existing assignment between trainer Satya and student Teja was to be preserved. A Yaswanth assignment was also present in the last known project state.
+
+Inspect the current database and implementation. Do not delete, recreate, or change any existing assignment.
+
+## 3. AUDIT AREA A: APPLICATION STRUCTURE AND ARCHITECTURE
+
+Inspect the actual project files and determine:
+
+1. The frontend framework, language, build system, and application entry point.
+2. The routing and authentication architecture.
+3. The components responsible for Admin, Trainer, and Student dashboards.
+4. How shared components and application state are managed.
+5. How the frontend connects to Supabase.
+6. Where the Gemini or other AI provider integration is implemented.
+7. How prompts, database queries, role context, and AI responses flow through the application.
+8. Whether the code contains duplicate, obsolete, unused, or conflicting implementations.
+9. Whether development/demo logic is mixed with production-facing logic.
+10. Whether the implemented architecture matches the application's intended Phase 1 scope.
+
+Produce a simple architecture diagram or text-based flow showing:
+
+User → Authentication → Role Verification → Dashboard → Supabase Data Access → UI / AI Chatbot.
+
+Correct the diagram if the actual implementation uses a different flow.
+
+## 4. AUDIT AREA B: AUTHENTICATION AND ROLE-BASED ACCESS
+
+Inspect the complete authentication flow.
+
+Verify:
+- Registration and sign-in.
+- Email confirmation requirements and error handling.
+- Sign-out and session invalidation.
+- Session persistence and refresh behavior.
+- User identity mapping between auth.uid() and public.users.id.
+- Role resolution from the actual database.
+- Behavior when the user has no profile, an invalid role, or a missing student/trainer mapping.
+- Protection against users changing roles through frontend state or browser requests.
+- Whether a Student can open Admin or Trainer routes directly.
+- Whether a Trainer can open Admin-only functionality.
+- Whether a logged-out user can access protected application data.
+
+Inspect the actual route guards and backend/database enforcement.
+
+A hidden button or redirected page is not sufficient evidence of security.
+
+Never attempt destructive authentication tests. Use existing authorized accounts and read-only checks where possible.
+
+## 5. AUDIT AREA C: SUPABASE DATABASE AND DATA INTEGRITY
+
+Inspect the actual schema and report:
+
+- Tables and columns.
+- Primary and foreign keys.
+- Unique constraints.
+- Required versus nullable fields.
+- Relationships between auth.users, public.users, public.students, trainers, student_learning_data, student_progress, and assignment records.
+- Duplicate student IDs or duplicate profile mappings.
+- Orphaned records.
+- Invalid or inconsistent role values.
+- Invalid score ranges, risk values, placement values, and completion percentages.
+- Missing data and null values.
+- Whether student IDs are correctly mapped to the dataset.
+- Whether student-specific analytics are matched to the correct authenticated user.
+- Whether the UI reads real database records or substitutes hardcoded/demo data.
+- Whether database errors are surfaced or silently ignored.
+
+Check whether the 500 dataset records remain intact. Do not export or print all personal student records in the report. Use aggregate results and limited, authorized sample checks.
+
+Do not modify data to resolve discrepancies.
+
+## 6. AUDIT AREA D: ROW LEVEL SECURITY AND DATABASE PERMISSIONS
+
+This is a high-priority security audit.
+
+Inspect RLS status and policies for all relevant tables, including:
+- public.users
+- public.students
+- public.student_learning_data
+- public.student_progress
+- public.trainers, if present
+- The student-trainer assignment table, if present
+
+Inspect:
+- SELECT, INSERT, UPDATE, and DELETE policies.
+- Table grants and effective permissions.
+- Role checks and auth.uid() comparisons.
+- Whether policies restrict access to the correct student, assigned trainer, or authorized admin.
+- Whether an authenticated user can query another student's private profile or learning record.
+- Whether a trainer can access only students assigned to that trainer.
+- Whether assignment changes are restricted to authorized admins.
+- Whether frontend filtering is being incorrectly relied upon instead of database enforcement.
+- Whether SECURITY DEFINER functions use safe search paths and appropriate authorization checks.
+- Whether exposed functions can bypass expected access restrictions.
+
+Use safe, read-only verification where possible.
+
+If cross-user isolation cannot be conclusively tested because suitable existing accounts or authorized test methods are unavailable, report NOT PROVEN.
+
+Do not create synthetic users, assignments, or records merely to demonstrate a security test.
+
+Do not use a service-role secret from the frontend or reveal any secret values.
+
+## 7. AUDIT AREA E: ADMIN DASHBOARD
+
+Inspect and test the existing Admin Dashboard.
+
+Check:
+- Admin authentication and role verification.
+- Dashboard loading and errors.
+- Student and trainer counts.
+- Dataset analytics and aggregate calculations.
+- Assignment counters.
+- Assignment creation and validation logic.
+- Trainer and student dropdown data sources.
+- Duplicate assignment prevention.
+- One-primary-trainer-per-student validation.
+- Active assignment listing and search.
+- Unassignment confirmation and authorization.
+- Loading, empty, success, and error states.
+- Whether counts represent platform users, dataset records, profiles, or distinct students.
+- Whether database-backed metrics are incorrectly described as dataset-derived metrics.
+- Whether the Admin chatbot can access the platform-level information it is expected to provide.
+
+Do not create or delete assignments during this audit.
+
+Clearly distinguish working functionality from features that are present in the UI but not connected to real data.
+
+## 8. AUDIT AREA F: TRAINER DASHBOARD
+
+Inspect the Trainer Dashboard.
+
+Check:
+- Trainer authentication and role verification.
+- Retrieval of the authenticated trainer's assignments.
+- Correct display of assigned students.
+- Correct student-to-trainer mapping.
+- Readiness scores, risk levels, placement readiness, course, batch, and recommended topics.
+- Student search, filtering, and aggregate analytics, if implemented.
+- Chatbot access restrictions for assigned students.
+- Handling of unassigned students and empty states.
+- Whether the Trainer Dashboard can access unauthorized students through frontend or direct database requests.
+- Error handling when assignment queries fail.
+- Whether all displayed counts and summaries are based on the correct population.
+
+Previously observed trainer chatbot behavior:
+- Correctly listed assigned students Teja and Yaswanth.
+- Correctly compared their readiness scores: 76.8 and 66.1.
+- Correctly refused to disclose students outside the trainer's assigned group.
+- Correctly stated that attendance and assignment submission counts were unavailable in the dataset.
+- One broad risk-breakdown query previously failed, while a more specific risk-level query succeeded.
+
+Retest only when the existing application and authorized account access permit it. Determine whether the query inconsistency is reproducible.
+
+Chatbot refusal is not proof of database-level security.
+
+## 9. AUDIT AREA G: STUDENT DASHBOARD
+
+Inspect the Student Dashboard and verify:
+
+- Student login and profile loading.
+- Correct authenticated identity.
+- Correct mapping from the authenticated user to public.students.
+- Correct mapping from the institutional student ID to student_learning_data.
+- Course and batch information.
+- Readiness score, risk level, placement readiness, and recommended topic.
+- Education level and learning goals.
+- Learning progress and submission history.
+- Empty-state behavior when no progress records exist.
+- Visibility of planned or incomplete features.
+- Sign-out and protected-route behavior.
+
+Previously completed manual tests:
+
+Teja:
+- Student ID 11391.
+- Readiness 76.8.
+- Risk Low.
+- Placement Ready.
+- Recommended topic Logic Puzzles & Patterns.
+
+Yaswanth:
+- Student ID 28400.
+- Readiness 66.1.
+- Risk Low.
+- Placement status displayed as Developing Skills.
+- Recommended topic Numerical Reasoning Drills.
+
+Both accounts displayed their corresponding expected academic records during previous manual tests.
+
+The Student chatbot:
+- Returned the expected profile values.
+- Refused a request for other students' records.
+- Did not invent attendance or assignment submission counts.
+- Correctly disclosed that those metrics were unavailable in the dataset.
+
+The `student_progress` table was empty during the previous test. No practice-start button was visible in the tested Student Dashboard.
+
+Verify current behavior and report any mismatch between the dashboard's claims and implemented functionality.
+
+## 10. AUDIT AREA H: AI CHATBOT AND DATA GROUNDING
+
+Inspect the chatbot implementation, not just its responses.
+
+Determine:
+- Which AI provider and model are configured.
+- How the API key is protected.
+- Whether AI calls happen through a secure server-side function or expose credentials in the browser.
+- Whether the chatbot receives actual database records, a filtered dataset, hardcoded examples, or only a prompt.
+- How the logged-in user's role and identity are obtained.
+- How student and trainer access restrictions are enforced.
+- Whether retrieval and filtering occur before the prompt is sent to the model.
+- Whether the AI can invent scores, attendance, assignments, course details, or recommendations.
+- Whether prompt injection or requests for unauthorized records can bypass application-level restrictions.
+- Whether database errors, empty query results, and timeouts are handled correctly.
+- Whether model-generated explanations are clearly distinguished from facts explicitly stored in the dataset.
+
+Check whether the following dataset-based metrics are reproducible from the actual source data:
+- Total records: 500.
+- Average readiness score: previously reported as 61.67.
+- Placement Ready: 108 (21.6%).
+- Placement Developing / Not Ready: 392 (78.4%).
+- Low risk: 248 (49.6%).
+- Medium risk: 147 (29.4%).
+- High risk: 105 (21.0%).
+
+Verify calculations rather than assuming they are correct.
+
+A previously observed Admin chatbot response listed recommended-topic counts:
+- Coding Fundamentals: 297.
+- Numerical Reasoning Drills: 75.
+- Interview Communication: 53.
+- Logic Puzzles & Patterns: 50.
+- Problem-Solving Strategies: 18.
+
+These figures sum to 493 rather than 500. Determine whether seven records have null, blank, unexpected, or omitted topic values, or whether the chatbot's calculation is incorrect. Do not guess.
+
+The Admin chatbot previously answered that trainer and assignment counts were not in the dataset. Verify whether these metrics should be retrieved from the separate platform tables and whether the chatbot actually supports such queries.
+
+The Admin chatbot previously refused to disclose private authentication information. Verify that it never exposes passwords, tokens, private keys, or authentication secrets.
+
+Do not modify chatbot prompts or model configuration during this audit.
+
+## 11. AUDIT AREA I: STUDENT-TRAINER ASSIGNMENT MANAGEMENT
+
+Inspect the assignment implementation and database.
+
+Verify:
+- Assignment table existence and schema.
+- Primary and foreign keys.
+- One-primary-trainer-per-student constraint or equivalent enforcement.
+- Whether duplicate assignments are prevented in both application logic and database constraints.
+- Whether assignment creation requires admin authorization.
+- Whether unassignment requires admin authorization.
+- Whether trainer dashboards reflect assignment changes.
+- Whether assigned students can access only their own records.
+- Whether unassigned students are handled correctly.
+- Whether failed database operations produce accurate user-facing errors.
+- Whether concurrent requests could create duplicate assignments.
+
+Preserve all existing records and assignments.
+
+Do not create or remove any assignment during the audit.
+
+## 12. AUDIT AREA J: FRONTEND, UX, BUILD AND ERROR HANDLING
+
+Inspect the actual code and available build/test results.
+
+Check:
+- TypeScript errors.
+- Build errors.
+- Lint errors, if configured.
+- Broken imports and routes.
+- Missing components.
+- Console errors and failed network requests where observable.
+- Invalid API calls.
+- Loading indicators.
+- Empty states.
+- Form validation.
+- Error messages.
+- Responsive layout.
+- Accessibility basics.
+- Navigation and sign-out.
+- Buttons that do nothing.
+- UI sections that imply a capability that is not implemented.
+- Hardcoded placeholder metrics that look like real results.
+- Stale or inconsistent dashboard data.
+
+Run only non-destructive checks supported by the existing environment. If the build or console cannot be accessed, report the limitation instead of claiming success.
+
+## 13. AUDIT AREA K: SECURITY, CONFIGURATION AND PRIVACY
+
+Inspect:
+- Environment variable usage.
+- Public versus private Supabase keys.
+- API key exposure in source files or browser bundles.
+- Server-side secret handling.
+- CORS and function authorization, where applicable.
+- SQL injection risks.
+- Unsafe HTML rendering.
+- Insecure direct object references.
+- Authentication/session handling.
+- Excessive data returned to the browser.
+- Logging of private student data.
+- Overly permissive database grants.
+- Publicly accessible tables or functions.
+- Dependency and configuration risks that can be identified from available evidence.
+
+Never display the actual values of discovered secrets in the audit report. Identify the file or configuration location and describe the risk without printing the secret.
+
+Do not rotate, revoke, or change credentials automatically.
+
+## 14. AUDIT AREA L: PHASE 1 SCOPE AND COMPLETION
+
+Classify every significant feature into one of these categories:
+
+1. Implemented and verified.
+2. Implemented but not fully tested.
+3. Partially implemented.
+4. UI present but backend functionality missing.
+5. Planned for a future phase.
+6. Broken or blocked.
+7. Not found in the current implementation.
+8. Unable to verify.
+
+Use actual project evidence to classify features.
+
+Specifically review:
+- Authentication and role verification.
+- Admin dashboard.
+- Trainer dashboard.
+- Student dashboard.
+- Dataset import and mapping.
+- Supabase integration.
+- Student-trainer assignments.
+- AI chatbot.
+- Role-based privacy.
+- Learning progress tracking.
+- Practice submission workflow.
+- Adaptive Practice Queue.
+- Internship Readiness Scorecard.
+- Analytics and reporting.
+- Error handling and stability.
+
+Do not automatically label planned features as defects. Evaluate them against the actual Phase 1 requirements. If the requirements are not available, explicitly state that scope compliance cannot be fully established.
+
+## 15. TESTING RULES AND EVIDENCE
+
+For each test, record:
+- Test ID.
+- Feature.
+- Test objective.
+- Actual steps performed.
+- Expected result.
+- Actual result.
+- Evidence or source location.
+- Status.
+
+Use only these test statuses:
+- PASS: Successfully executed or conclusively verified.
+- FAIL: A reproducible failure or confirmed defect.
+- PARTIAL: Some functionality works, but important behavior remains incomplete.
+- NOT TESTED: No test was executed.
+- NOT PROVEN: Available evidence is insufficient to establish the claim.
+- BLOCKED: A required environment, permission, account, or dependency is unavailable.
+
+Do not convert NOT TESTED or NOT PROVEN into PASS.
+
+For code findings, provide the relevant file path and function/component name. Include line numbers only if they can be verified.
+
+For database findings, identify the table, policy, function, or constraint involved.
+
+For security findings, describe the practical risk without exposing student records or secrets.
+
+Separate observed facts from hypotheses and recommendations.
+
+## 16. SEVERITY CLASSIFICATION
+
+Classify findings as:
+
+- CRITICAL: Confirmed severe vulnerability, credential exposure, or major unauthorized data access.
+- HIGH: Significant security, data-integrity, authentication, or core-functionality defect.
+- MEDIUM: Important feature failure, inconsistent behavior, or incomplete essential workflow.
+- LOW: Minor usability, validation, presentation, or maintainability issue.
+- INFO: Verified behavior, limitation, or improvement recommendation without a confirmed defect.
+
+Do not inflate severity without evidence.
+
+## 17. REQUIRED FINAL REPORT
+
+Produce the report in the following order.
+
+### Section 1: Executive Summary
+- Current overall state of Phase 1.
+- What is working.
+- What is incomplete.
+- Most important risks.
+- Whether the application is ready for demonstration, ready with limitations, or blocked by confirmed issues.
+- Clearly explain what evidence supports the conclusion.
+
+Do not claim production readiness solely because dashboards load.
+
+### Section 2: Architecture Overview
+Show the actual frontend, authentication, database, AI, and role-verification flow.
+
+### Section 3: Feature-by-Feature Audit Matrix
+Use columns:
+
+Feature | Implementation Evidence | Test Status | Current Behavior | Issues | Recommended Action
+
+### Section 4: Completed Work
+List work that is demonstrably implemented and verified.
+
+### Section 5: Pending Work
+List incomplete features, untested flows, and features explicitly scheduled for future development.
+
+### Section 6: Defects and Errors
+For every confirmed defect, include:
+- ID.
+- Severity.
+- Description.
+- Evidence.
+- Impact.
+- Reproduction steps.
+- Root cause, if confirmed.
+- Recommended fix.
+
+Do not invent root causes.
+
+### Section 7: Security and RLS Audit
+Report policy findings, grants, authorization behavior, verified isolation, and all NOT PROVEN checks.
+
+### Section 8: Data Integrity and Analytics Validation
+Report row counts, nulls, duplicates, inconsistent mappings, score distributions, placement counts, risk distributions, and recommended-topic totals based on actual queries or available evidence.
+
+### Section 9: AI Chatbot Audit
+Report data grounding, role-specific behavior, unsupported-question handling, privacy behavior, query reliability, and known limitations.
+
+### Section 10: Test Results
+Provide a table of all executed and pending tests with their actual status.
+
+### Section 11: Phase 1 Readiness Assessment
+Summarize:
+- Core functionality.
+- Data correctness.
+- Authentication and authorization.
+- Stability.
+- AI reliability.
+- Demonstration readiness.
+
+Do not use an arbitrary numeric score unless a defined scoring method is provided.
+
+### Section 12: Prioritized Fix Plan
+Organize fixes into:
+1. Critical security/data-integrity fixes.
+2. High-priority core functionality.
+3. Medium-priority incomplete workflows.
+4. Low-priority UX and polish.
+5. Future-phase enhancements.
+
+For each item, state the reason, dependencies, and acceptance criteria.
+
+### Section 13: Presentation and Viva Preparation
+Based on verified implementation, provide:
+- A truthful project summary.
+- Implemented technologies and their actual roles.
+- What the AI chatbot does.
+- How Supabase authentication and role access work.
+- What the dataset contains.
+- What is completed versus planned.
+- Five likely technical questions and beginner-friendly answers.
+- Known limitations that should be acknowledged during the presentation.
+
+Never describe a planned feature as implemented.
+
+### Section 14: Beginner-Friendly Conclusion
+Explain in simple language:
+- What is working today.
+- What is not working or not yet built.
+- What must be fixed first.
+- What can safely wait until after Phase 1.
+- The single recommended next action.
+
+## 18. FINAL INSTRUCTION
+
+Start by inspecting the current project and gathering evidence.
+
+Do not make code changes during the initial audit.
+
+If a required resource cannot be accessed, clearly identify it and continue with the remaining accessible areas.
+
+Do not fabricate test results, schema details, counts, screenshots, file paths, or successful operations.
+
+Finish the audit report before proposing implementation changes.
+
+After the report, wait for my approval before making any fixes.
+
+Remember: the goal is to understand the real current state of the existing Phase 1 application, preserve completed work, identify genuine defects, and prepare an accurate project demonstration—not to rebuild the project from scratch.
