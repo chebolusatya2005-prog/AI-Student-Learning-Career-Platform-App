@@ -156,8 +156,8 @@ async function generateGeminiReply(
   contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
   systemInstruction: string
 ): Promise<{ text: string; modelUsed: string }> {
-  // Resilient candidate list prioritizing high-availability gemini-2.5-flash followed by gemini-3.1-flash-lite, gemini-3.8-flash and gemini-flash-latest
-  const candidateModels = ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  // Resilient candidate list: gemini-2.5-flash and gemini-3.5-flash-lite
+  const candidateModels = ['gemini-2.5-flash', 'gemini-3.5-flash-lite'];
   let lastError: unknown = null;
 
   for (const model of candidateModels) {
@@ -352,6 +352,20 @@ async function handleStudentAnalyticsChat(req: Request, res: Response): Promise<
         verifiedCalculations.riskBreakdown = pyStats.risk_distribution.counts;
         verifiedCalculations.topRecommendedTopics = pyStats.top_recommended_topics;
         verifiedCalculations.validationBenchmark = pyStats.validation_benchmark;
+        verifiedCalculations.pearsonCorrelation = pyStats.pearson_correlation;
+        verifiedCalculations.engagementMetrics = pyStats.engagement_metrics;
+
+        const corrObj = pyStats.pearson_correlation;
+        const corrText =
+          corrObj?.correlation_coefficient !== null && corrObj?.correlation_coefficient !== undefined
+            ? `${corrObj.correlation_coefficient} (${corrObj.description}) based on ${corrObj.valid_pairs_count} valid paired observations. Note: ${corrObj.disclaimer}`
+            : `${corrObj?.description || 'Insufficient paired observations to calculate Pearson correlation.'}`;
+
+        const eng = pyStats.engagement_metrics;
+        const attText =
+          eng?.attendance?.mean !== null && eng?.attendance?.mean !== undefined
+            ? `${eng.attendance.mean}% average (recorded for ${eng.attendance.recorded_count} students; ${eng.attendance.missing_count} unrecorded)`
+            : 'Unrecorded in accessible records';
 
         datasetContext = `
 AUTHORIZED ROLE: Administrator (Full aggregate analytics access powered by Python Analytics Engine)
@@ -364,6 +378,12 @@ CURRENT VERIFIED DATASET FACTS (Batch 2013J, Course: Open University - AAA):
   * High Risk: ${pyStats.risk_distribution.counts.High} students (${pyStats.risk_distribution.percentages.High}%)
   * Medium Risk: ${pyStats.risk_distribution.counts.Medium} students (${pyStats.risk_distribution.percentages.Medium}%)
   * Low Risk: ${pyStats.risk_distribution.counts.Low} students (${pyStats.risk_distribution.percentages.Low}%)
+- Attendance-Readiness Pearson Correlation (r): ${corrText}
+- Cohort Engagement Metrics (Calculated without zero-imputation):
+  * Average Attendance: ${attText}
+  * Sessions Attended Mean: ${eng?.sessions_attended?.mean !== null && eng?.sessions_attended?.mean !== undefined ? `${eng.sessions_attended.mean} sessions` : 'Unrecorded'}
+  * Sessions Missed Mean: ${eng?.sessions_missed?.mean !== null && eng?.sessions_missed?.mean !== undefined ? `${eng.sessions_missed.mean} sessions` : 'Unrecorded'}
+  * Assignment Score Mean: ${eng?.assignments?.mean_score !== null && eng?.assignments?.mean_score !== undefined ? `${eng.assignments.mean_score}%` : 'Unrecorded'}
 - Top Recommended Learning Topics (Python Frequency Analysis):
 ${pyStats.top_recommended_topics.map((t: any) => `  * ${t.topic}: recommended for ${t.count} students`).join('\n')}
 - Validation Benchmark: ${pyStats.validation_benchmark.matches_known_500_dataset ? 'Matches verified 500-student cohort benchmark targets' : 'Calculated dynamically from accessible records'}
@@ -730,8 +750,8 @@ CRITICAL OPERATING RULES:
 2. ATTENDANCE & ASSIGNMENT DATA: Answer attendance and assignment questions directly and accurately using ONLY the actual retrieved database values provided in the context (Attendance Percentage, Sessions Attended, Sessions Missed, Assignments Assigned, Assignments Completed, Assignment Completion Percentage, Average Assignment Score, Late Submissions Count).
 3. DISTINGUISH ZERO FROM UNRECORDED: Clearly distinguish zero (0) from NULL or unavailable values. If a value is 0 (e.g., 0 late submissions or 0 sessions missed), report it clearly as 0. If a value is "Not recorded", explicitly inform the user that this specific metric is not recorded in their dataset.
 4. ZERO FABRICATION: Never guess, estimate, or make up metrics, attendance percentages, assignment counts, or student scores. If no learning record exists or the student's learning data is not linked, clearly inform them: "Your learning data has not been linked yet. Please contact your administrator or academic advisor to link your student profile to your learning records."
-5. STRICT ROLE-BASED PRIVACY:
-   - Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record or compare them to unnamed individuals.
+5. STRICT ROLE-BASED PRIVACY & CROSS-STUDENT ISOLATION:
+   - Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record, readiness score, or risk tier. If a user asks about another student (e.g. "What is Yaswanth's score or risk level?"), you MUST explicitly refuse to disclose another student's private record due to institutional student privacy policies.
    - Trainers only have access to their assigned courses and students.
    - Administrators can view aggregate statistics and batch distributions.
 6. OUT-OF-SCOPE REFUSAL: Do not answer general programming questions (e.g. writing Python/SQL code), trivia, jokes, essays, or general knowledge. If the user asks an out-of-scope question, politely inform them of your specialized role and provide 2-3 dataset questions they can ask.
@@ -923,6 +943,21 @@ app.post('/api/analytics/batch-stats', async (req: Request, res: Response) => {
       return;
     }
 
+    // Enforce backend Admin authorization on batch cohort analytics
+    const { data: userProfile } = await userClient
+      .from('users')
+      .select('id, email, full_name, role')
+      .eq('id', authData.user.id)
+      .maybeSingle();
+
+    const role = (userProfile?.role || 'student').toLowerCase();
+    if (role !== 'admin') {
+      res.status(403).json({
+        error: 'Forbidden. Admin authorization required to access cohort batch analytics.',
+      });
+      return;
+    }
+
     // Query records using the authenticated userClient (respects RLS)
     const { data: records, error: dbErr } = await userClient
       .from('student_learning_data')
@@ -1026,7 +1061,7 @@ CRITICAL OPERATING RULES:
 2. ATTENDANCE & ASSIGNMENT DATA: Answer attendance and assignment questions directly and accurately using ONLY the actual retrieved database values provided in the context (Attendance Percentage, Sessions Attended, Sessions Missed, Assignments Assigned, Assignments Completed, Assignment Completion Percentage, Average Assignment Score, Late Submissions Count).
 3. DISTINGUISH ZERO FROM UNRECORDED: Clearly distinguish zero (0) from NULL or unavailable values. If a value is 0 (e.g., 0 late submissions or 0 sessions missed), report it clearly as 0. If a value is "Not recorded", explicitly inform the user that this specific metric is not recorded in their dataset.
 4. ZERO FABRICATION: Never guess, estimate, or make up metrics, attendance percentages, assignment counts, or student scores. If no learning record exists or the student's learning data is not linked, clearly inform them: "Your learning data has not been linked yet. Please contact your administrator or academic advisor to link your student profile to your learning records."
-5. STRICT ROLE-BASED PRIVACY: Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record or compare them to unnamed individuals.
+5. STRICT ROLE-BASED PRIVACY & CROSS-STUDENT ISOLATION: Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record, readiness score, or risk level. If a user asks about another student (e.g. "What is Yaswanth's score or risk level?"), you MUST explicitly refuse to disclose another student's private record due to institutional student privacy policies.
 6. OUT-OF-SCOPE REFUSAL: Do not answer general programming questions (e.g. writing Python/SQL code), trivia, jokes, essays, or general knowledge. If the user asks an out-of-scope question, politely inform them of your specialized role and provide 2-3 dataset questions they can ask.
 7. MATHEMATICAL ACCURACY: Always use the verified calculations and metrics provided in the dataset context. Never alter these values.
 8. EXPLICIT REFUSAL OF UNAVAILABLE DATA: If the user asks for information not recorded in the dataset (such as hourly LMS clickstream timestamps, raw exam question papers, personal chat transcripts, or unrecorded attendance sessions), you MUST explicitly state that this information is not recorded in the platform database. Do NOT estimate, invent, or speculate.
