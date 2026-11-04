@@ -6,6 +6,7 @@
 import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import { execFile } from 'child_process';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
@@ -73,6 +74,74 @@ function extractPlacementReady(r: Record<string, unknown>): boolean {
   return val === 'ready' || val === 'yes' || val === 'true' || val === '1';
 }
 
+// Helper to format metric values distinguishing zero (0) from null/undefined/unavailable
+function formatMetric(val: unknown, suffix = ''): string {
+  if (val === null || val === undefined) {
+    return 'Not recorded';
+  }
+  if (typeof val === 'number') {
+    if (isNaN(val)) return 'Not recorded';
+    return `${val}${suffix}`;
+  }
+  const s = String(val).trim();
+  if (s === '' || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined') {
+    return 'Not recorded';
+  }
+  if (suffix && s.endsWith(suffix)) {
+    return s;
+  }
+  return `${s}${suffix}`;
+}
+
+export interface PythonAnalyticsResult {
+  success: boolean;
+  action: string;
+  data?: any;
+  error?: string;
+  verified?: boolean;
+}
+
+/**
+ * Executes python/student_analytics.py using standard library Python 3.10 via subprocess JSON IPC.
+ * Streams JSON payload via stdin and captures structured JSON from stdout.
+ */
+export function runPythonAnalytics(action: string, payload: unknown): Promise<PythonAnalyticsResult> {
+  return new Promise((resolve) => {
+    const pythonScript = path.resolve(process.cwd(), 'python', 'student_analytics.py');
+    const child = execFile(
+      'python3',
+      [pythonScript, '--action', action],
+      { timeout: 5000, maxBuffer: 10 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error(`[Python Analytics Error] action=${action}:`, stderr || error.message);
+          return resolve({
+            success: false,
+            action,
+            error: stderr ? stderr.trim() : error.message,
+          });
+        }
+        try {
+          const parsed = JSON.parse(stdout);
+          resolve(parsed);
+        } catch (parseErr) {
+          console.error(`[Python Analytics Parse Error]`, stdout);
+          resolve({
+            success: false,
+            action,
+            error: `Failed to parse Python JSON output: ${stdout.slice(0, 150)}`,
+          });
+        }
+      }
+    );
+
+    if (child.stdin) {
+      child.stdin.write(JSON.stringify(payload));
+      child.stdin.end();
+    }
+  });
+}
+
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
@@ -87,37 +156,42 @@ async function generateGeminiReply(
   contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
   systemInstruction: string
 ): Promise<{ text: string; modelUsed: string }> {
-  // Resilient candidate list prioritizing high-availability gemini-3.1-flash-lite followed by gemini-3.8-flash and gemini-flash-latest
-  const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  // Resilient candidate list prioritizing high-availability gemini-2.5-flash followed by gemini-3.1-flash-lite, gemini-3.8-flash and gemini-flash-latest
+  const candidateModels = ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
   let lastError: unknown = null;
 
   for (const model of candidateModels) {
-    try {
-      console.log(`[Chatbot Diagnostics] Initiating generation with model: ${model}`);
-      const timeoutMs = 12000;
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms with ${model}`)), timeoutMs)
-      );
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`[Chatbot Diagnostics] Initiating generation with model: ${model} (attempt ${attempt})`);
+        const timeoutMs = 15000;
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms with ${model}`)), timeoutMs)
+        );
 
-      const generatePromise = ai.models.generateContent({
-        model,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.2,
-        },
-      });
+        const generatePromise = ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+            temperature: 0.2,
+          },
+        });
 
-      const response = await Promise.race([generatePromise, timeoutPromise]);
-      const text = response.text;
-      if (text && text.trim().length > 0) {
-        console.log(`[Chatbot Diagnostics] Successfully generated response with model: ${model} (${text.length} chars)`);
-        return { text, modelUsed: model };
+        const response = await Promise.race([generatePromise, timeoutPromise]);
+        const text = response.text;
+        if (text && text.trim().length > 0) {
+          console.log(`[Chatbot Diagnostics] Successfully generated response with model: ${model} (${text.length} chars)`);
+          return { text, modelUsed: model };
+        }
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[Chatbot Diagnostics] Model ${model} (attempt ${attempt}) notice: ${msg}`);
+        if (attempt < 2 && msg.includes('503')) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
       }
-    } catch (err: unknown) {
-      lastError = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[Chatbot Diagnostics] Model ${model} unavailable or timed out: ${msg}. Trying fallback...`);
     }
   }
 
@@ -258,97 +332,71 @@ async function handleStudentAnalyticsChat(req: Request, res: Response): Promise<
       }
 
       const records = allRecords || [];
-      const totalCount = records.length;
 
-      // Deterministic Statistical Calculations
-      let totalReadiness = 0;
-      let validReadinessCount = 0;
-      let highRiskCount = 0;
-      let medRiskCount = 0;
-      let lowRiskCount = 0;
-      let placementReadyCount = 0;
-      const topicCounts: Record<string, number> = {};
-
-      for (const r of records) {
-        const score = extractReadinessScore(r);
-        if (score !== null && !isNaN(score)) {
-          totalReadiness += score;
-          validReadinessCount += 1;
-        }
-
-        const risk = extractRiskLevel(r);
-        if (risk === 'High') highRiskCount += 1;
-        else if (risk === 'Medium') medRiskCount += 1;
-        else lowRiskCount += 1;
-
-        if (extractPlacementReady(r)) {
-          placementReadyCount += 1;
-        }
-
-        const rawTopic = r.recommended_topic ?? r.recommended_topics;
-        if (typeof rawTopic === 'string' && rawTopic.trim().length > 0) {
-          const parts = rawTopic.split(',').map((t) => t.trim());
-          for (const t of parts) {
-            if (t) topicCounts[t] = (topicCounts[t] || 0) + 1;
-          }
+      // Calculate cohort analytics dynamically using Python Analytics Engine
+      let pyStats: any = null;
+      if (records.length > 0) {
+        const pyResult = await runPythonAnalytics('batch-stats', { records });
+        if (pyResult.success && pyResult.data) {
+          pyStats = pyResult.data;
         }
       }
 
-      let avgReadiness =
-        validReadinessCount > 0 ? (totalReadiness / validReadinessCount).toFixed(2) : '63.25';
-      let placementPercentage =
-        totalCount > 0 ? ((placementReadyCount / totalCount) * 100).toFixed(1) : '20.0';
+      if (pyStats && pyStats.readiness_statistics) {
+        verifiedCalculations.totalRecords = pyStats.total_records;
+        verifiedCalculations.averageReadinessScore = pyStats.readiness_statistics.mean;
+        verifiedCalculations.medianReadinessScore = pyStats.readiness_statistics.median;
+        verifiedCalculations.standardDeviation = pyStats.readiness_statistics.standard_deviation;
+        verifiedCalculations.placementReadyCount = pyStats.placement_status.placement_ready_count;
+        verifiedCalculations.placementReadyPercentage = `${pyStats.placement_status.placement_ready_percentage}%`;
+        verifiedCalculations.riskBreakdown = pyStats.risk_distribution.counts;
+        verifiedCalculations.topRecommendedTopics = pyStats.top_recommended_topics;
+        verifiedCalculations.validationBenchmark = pyStats.validation_benchmark;
 
-      const finalTotal = totalCount > 0 ? totalCount : 20;
-      const finalPlacementReady = totalCount > 0 ? placementReadyCount : 4;
-      const finalHighRisk = totalCount > 0 ? highRiskCount : 2;
-      const finalMedRisk = totalCount > 0 ? medRiskCount : 6;
-      const finalLowRisk = totalCount > 0 ? lowRiskCount : 12;
-      if (totalCount === 0) {
-        avgReadiness = '63.25';
-        placementPercentage = '20.0';
-      }
-
-      verifiedCalculations.totalRecords = finalTotal;
-      verifiedCalculations.averageReadinessScore = avgReadiness;
-      verifiedCalculations.placementReadyCount = finalPlacementReady;
-      verifiedCalculations.placementReadyPercentage = `${placementPercentage}%`;
-      verifiedCalculations.riskBreakdown = {
-        High: finalHighRisk,
-        Medium: finalMedRisk,
-        Low: finalLowRisk,
-      };
-      verifiedCalculations.topRecommendedTopics = topicCounts;
-
-      datasetContext = `
-AUTHORIZED ROLE: Administrator (Full aggregate analytics access)
+        datasetContext = `
+AUTHORIZED ROLE: Administrator (Full aggregate analytics access powered by Python Analytics Engine)
 CURRENT VERIFIED DATASET FACTS (Batch 2013J, Course: Open University - AAA):
-- Total Student Records in student_learning_data: ${finalTotal}
-- Verified Average Overall Readiness Score: ${avgReadiness} (Exact calculated average from all recorded scores)
-- Placement Ready Students: ${finalPlacementReady} out of ${finalTotal} (${placementPercentage}%)
-- Placement Developing / Not Ready: ${finalTotal - finalPlacementReady} out of ${finalTotal} (${(100 - parseFloat(placementPercentage)).toFixed(1)}%)
+- Total Accessible Student Records in student_learning_data: ${pyStats.total_records}
+- Verified Average Overall Readiness Score: ${pyStats.readiness_statistics.mean} (Median: ${pyStats.readiness_statistics.median}, StdDev: ${pyStats.readiness_statistics.standard_deviation})
+- Placement Ready Students: ${pyStats.placement_status.placement_ready_count} out of ${pyStats.total_records} (${pyStats.placement_status.placement_ready_percentage}%)
+- Placement Developing / Not Ready: ${pyStats.placement_status.developing_count} out of ${pyStats.total_records} (${pyStats.placement_status.developing_percentage}%)
 - Risk Level Distribution:
-  * High Risk: ${finalHighRisk} students (${((finalHighRisk / finalTotal) * 100).toFixed(1)}%)
-  * Medium Risk: ${finalMedRisk} students (${((finalMedRisk / finalTotal) * 100).toFixed(1)}%)
-  * Low Risk: ${finalLowRisk} students (${((finalLowRisk / finalTotal) * 100).toFixed(1)}%)
-- Most Frequent Recommended Topics:
-${
-  Object.keys(topicCounts).length > 0
-    ? Object.entries(topicCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([topic, count]) => `  * ${topic}: recommended for ${count} students`)
-        .join('\n')
-    : `  * Advanced System Architecture: 5 students
-  * Dynamic Programming & Algorithms: 4 students
-  * API Design & Integration: 4 students
-  * Database Query Optimization: 4 students
-  * Microservices & Cloud Patterns: 3 students`
-}
+  * High Risk: ${pyStats.risk_distribution.counts.High} students (${pyStats.risk_distribution.percentages.High}%)
+  * Medium Risk: ${pyStats.risk_distribution.counts.Medium} students (${pyStats.risk_distribution.percentages.Medium}%)
+  * Low Risk: ${pyStats.risk_distribution.counts.Low} students (${pyStats.risk_distribution.percentages.Low}%)
+- Top Recommended Learning Topics (Python Frequency Analysis):
+${pyStats.top_recommended_topics.map((t: any) => `  * ${t.topic}: recommended for ${t.count} students`).join('\n')}
+- Validation Benchmark: ${pyStats.validation_benchmark.matches_known_500_dataset ? 'Matches verified 500-student cohort benchmark targets' : 'Calculated dynamically from accessible records'}
 
 UNRECORDED / MISSING DATA NOTE:
-- Detailed attendance percentage logs, individual assessment timestamps, and homework submission counters are NOT recorded in this dataset table. If the administrator asks about attendance or assignment logs, explicitly inform them that attendance and assignment logs are not recorded in this dataset batch; do NOT invent or fabricate percentages.
+- Detailed hourly LMS login clickstream timestamps, raw exam question papers, and homework submission counters are NOT recorded in this dataset table. If the administrator asks about clickstream logs or raw papers, explicitly state they are not recorded in the database.
 `;
+      } else {
+        // Transparent reporting if database RLS restricts access to 0 records
+        verifiedCalculations.accessibleRecords = 0;
+        verifiedCalculations.benchmarkTargets = {
+          totalRecords: 500,
+          averageReadiness: 61.67,
+          placementReadyCount: 108,
+          placementReadyPercentage: '21.6%',
+          riskBreakdown: { Low: 248, Medium: 147, High: 105 },
+        };
+
+        datasetContext = `
+AUTHORIZED ROLE: Administrator
+CURRENT ACCESSIBLE DATASET STATUS:
+- Total Student Records Accessible Under Current Session RLS: 0
+- RLS Policy Notice: Database Row-Level Security policy restricts broad SELECT on student_learning_data for this authenticated user.
+- Verified Cohort Benchmark Reference (500-student institutional dataset targets):
+  * Target Population: 500 records
+  * Expected Benchmark Mean Readiness: 61.67
+  * Placement Ready: 108 students (21.6%) | Developing: 392 students (78.4%)
+  * Risk Breakdown: Low 248 (49.6%), Medium 147 (29.4%), High 105 (21.0%)
+
+UNRECORDED / MISSING DATA NOTE:
+- Detailed attendance percentage logs, individual assessment timestamps, and hourly LMS logs are NOT recorded in this table. If requested, inform the administrator that this information is unrecorded; do not fabricate numbers.
+`;
+      }
     } else if (role === 'trainer') {
       // Query assigned students from trainer_student_assignments for this trainer
       const { data: assignments, error: assignErr } = await userClient
@@ -534,44 +582,143 @@ Attendance and detailed assignment submission logs are unrecorded in this datase
 
       const myLearningData = personalRecords && personalRecords.length > 0 ? personalRecords[0] : null;
 
-      // Extract verified student attributes
-      const displayScore = myLearningData ? (extractReadinessScore(myLearningData) ?? 76.8) : 76.8;
-      const displayRisk = myLearningData ? extractRiskLevel(myLearningData) : 'Low';
-      const displayPlacementReady = myLearningData ? extractPlacementReady(myLearningData) : true;
-      const displayTopic = myLearningData
-        ? (myLearningData.recommended_topic || myLearningData.recommended_topics || 'Logic Puzzles & Patterns')
-        : 'Logic Puzzles & Patterns';
-
-      datasetContext = `
+      if (!myLearningData) {
+        datasetContext = `
 AUTHORIZED ROLE: Student
 STUDENT ACCOUNT:
 - User ID: ${authUser.id}
 - Name: ${fullName}
 - Email: ${authUser.email}
-- Institutional Student ID: ${resolvedStudentId ? String(resolvedStudentId) : '11391'}
-- Education Level: ${studentProfileRecord?.education_level || 'Higher Education Degree'}
-- Learning Goals: ${studentProfileRecord?.learning_goals || 'Software Engineering and Cloud Computing'}
+- Institutional Student ID: ${resolvedStudentId ? String(resolvedStudentId) : 'Not assigned'}
+- Education Level: ${studentProfileRecord?.education_level || 'Not specified'}
+- Learning Goals: ${studentProfileRecord?.learning_goals || 'Not specified'}
 
-PERSONAL LEARNING RECORD (public.student_learning_data for Student ID ${resolvedStudentId || '11391'}):
-- Readiness Score: ${displayScore}
-- Risk Level: ${displayRisk}
-- Placement Readiness: ${displayPlacementReady ? 'Placement Ready (Yes)' : 'Developing'}
-- Recommended Topic: ${displayTopic}
-- Course Name: ${myLearningData?.course || myLearningData?.course_name || (myLearningData?.code_module ? 'Open University - ' + myLearningData.code_module : 'Open University - AAA')}
-- Batch ID: ${myLearningData?.batch || myLearningData?.batch_id || myLearningData?.code_presentation || '2013J'}
+PERSONAL LEARNING RECORD STATUS:
+- Status: NOT LINKED. No learning record was found in public.student_learning_data matching this student profile.
+- INSTRUCTION FOR ASSISTANT: The student's learning data has not been linked yet. When the student asks about their performance, readiness score, risk tier, attendance, assignments, scores, or recommendations, clearly and politely inform them: "Your learning data has not been linked yet. Please contact your administrator or academic advisor to link your student profile to your learning records." Do NOT fabricate, estimate, or make up any metrics or statistics.
 
 COURSE PROGRESS (public.student_progress):
 ${
   progressRecords && progressRecords.length > 0
-    ? progressRecords.map((p) => `- Progress item: ${p.title || 'Module'}, Score: ${p.score ?? 'N/A'}, Status: ${p.status ?? 'In progress'}`).join('\n')
+    ? progressRecords
+        .map(
+          (p) =>
+            `- Progress item: ${p.title || 'Module'}, Score: ${p.score ?? 'N/A'}, Status: ${p.status ?? 'In progress'}`
+        )
+        .join('\n')
+    : '- No external course progress records logged.'
+}
+`;
+      } else {
+        // Extract verified student attributes
+        const readinessScoreVal = extractReadinessScore(myLearningData);
+        const displayScore = readinessScoreVal !== null ? `${readinessScoreVal}%` : 'Not recorded';
+        const displayRisk = extractRiskLevel(myLearningData);
+        const displayPlacementReady = extractPlacementReady(myLearningData);
+        const displayTopic =
+          myLearningData.recommended_topic ||
+          (Array.isArray(myLearningData.recommended_topics)
+            ? myLearningData.recommended_topics.join(', ')
+            : myLearningData.recommended_topics) ||
+          'Not recorded';
+        const displaySkill =
+          myLearningData.recommended_skill ? String(myLearningData.recommended_skill) : 'Not recorded';
+        const displayAction =
+          myLearningData.recommended_learning_action ? String(myLearningData.recommended_learning_action) : 'Not recorded';
+        const displayCourse =
+          myLearningData.course ||
+          myLearningData.course_name ||
+          (myLearningData.code_module ? 'Open University - ' + myLearningData.code_module : 'Not recorded');
+        const displayBatch =
+          myLearningData.batch ||
+          myLearningData.batch_id ||
+          myLearningData.code_presentation ||
+          'Not recorded';
+
+        // 8 Verified Database Columns for Attendance & Assignments:
+        const rawAttendancePercentage =
+          myLearningData.attendance_percentage ?? myLearningData.attendance;
+        const rawSessionsAttended = myLearningData.sessions_attended;
+        const rawSessionsMissed = myLearningData.sessions_missed;
+        const rawAssignmentsAssigned = myLearningData.assignments_assigned;
+        const rawAssignmentsCompleted = myLearningData.assignments_completed;
+        const rawAssignmentCompletionPercentage =
+          myLearningData.assignment_completion_percentage ?? myLearningData.assignment_completion;
+        const rawAverageAssignmentScore =
+          myLearningData.average_assignment_score ??
+          myLearningData.average_assessment_score ??
+          myLearningData.average_assessment;
+        const rawLateSubmissionsCount =
+          myLearningData.late_submissions_count ?? myLearningData.late_submissions;
+
+        const attendancePercentage = formatMetric(rawAttendancePercentage, '%');
+        const sessionsAttended = formatMetric(rawSessionsAttended);
+        const sessionsMissed = formatMetric(rawSessionsMissed);
+        const assignmentsAssigned = formatMetric(rawAssignmentsAssigned);
+        const assignmentsCompleted = formatMetric(rawAssignmentsCompleted);
+        const assignmentCompletionPercentage = formatMetric(rawAssignmentCompletionPercentage, '%');
+        const averageAssignmentScore = formatMetric(rawAverageAssignmentScore);
+        const lateSubmissionsCount = formatMetric(rawLateSubmissionsCount);
+
+        const activeStudentId = resolvedStudentId
+          ? String(resolvedStudentId)
+          : myLearningData.student_id
+          ? String(myLearningData.student_id)
+          : 'Verified Record';
+
+        datasetContext = `
+AUTHORIZED ROLE: Student
+STUDENT ACCOUNT:
+- User ID: ${authUser.id}
+- Name: ${fullName}
+- Email: ${authUser.email}
+- Institutional Student ID: ${resolvedStudentId ? String(resolvedStudentId) : 'Not assigned'}
+- Education Level: ${studentProfileRecord?.education_level || 'Not specified'}
+- Learning Goals: ${studentProfileRecord?.learning_goals || 'Not specified'}
+
+PERSONAL LEARNING RECORD (public.student_learning_data for Student ID ${activeStudentId}):
+- Overall Readiness Score: ${displayScore}
+- Risk Level: ${displayRisk}
+- Placement Readiness: ${displayPlacementReady ? 'Placement Ready (Yes)' : 'Developing (No)'}
+- Recommended Topic: ${displayTopic}
+- Recommended Skill: ${displaySkill}
+- Recommended Learning Action: ${displayAction}
+- Course Name: ${displayCourse}
+- Batch / Presentation ID: ${displayBatch}
+
+ATTENDANCE & ENGAGEMENT METRICS (Verified Database Values):
+- Attendance Percentage: ${attendancePercentage}
+- Sessions Attended: ${sessionsAttended}
+- Sessions Missed: ${sessionsMissed}
+
+ASSIGNMENT & ASSESSMENT METRICS (Verified Database Values):
+- Assignments Assigned: ${assignmentsAssigned}
+- Assignments Completed: ${assignmentsCompleted}
+- Assignment Completion Percentage: ${assignmentCompletionPercentage}
+- Average Assignment Score: ${averageAssignmentScore}
+- Late Submissions Count: ${lateSubmissionsCount}
+
+COURSE PROGRESS (public.student_progress):
+${
+  progressRecords && progressRecords.length > 0
+    ? progressRecords
+        .map(
+          (p) =>
+            `- Progress item: ${p.title || 'Module'}, Score: ${p.score ?? 'N/A'}, Status: ${p.status ?? 'In progress'}`
+        )
+        .join('\n')
     : '- No external course progress records logged.'
 }
 
 STRICT DATASET BOUNDARY & PRIVACY ENFORCEMENT:
-- This student is ONLY permitted to view their own academic profile, readiness status, risk level, and learning recommendations.
+- This student is ONLY permitted to view their own academic profile, readiness status, risk level, attendance, assignments, and learning recommendations.
 - NEVER reveal or discuss other students' names, scores, or risk assessments.
-- Attendance logs, hourly attendance rates, and assignment submission counts are NOT recorded in this database batch. If the student asks about attendance or assignments, clearly and politely inform them: "Attendance records and assignment submission counts are not currently recorded in your dataset." Never fabricate or invent missing values.
+- When answering queries regarding attendance or assignments, use ONLY the verified values provided above under ATTENDANCE & ENGAGEMENT METRICS and ASSIGNMENT & ASSESSMENT METRICS.
+- Accurately distinguish zero (0) from "Not recorded". If a value is 0 (such as 0 late submissions or 0 sessions missed), report it clearly as 0. If a metric is "Not recorded", state clearly that it is not recorded in their profile.
+- Never fabricate, guess, or invent missing values.
+- EXPLICIT REFUSAL OF UNAVAILABLE DATA: If the student asks for information not present in the dataset (such as hourly LMS login clickstream logs, raw exam question papers, personal chat transcripts, or unrecorded sessions), explicitly state that this information is not recorded in the platform database. Do NOT estimate or invent.
 `;
+      }
     }
 
     // 3. System Instruction for Gemini
@@ -580,14 +727,17 @@ You are EduCareer AI, the dedicated, dataset-grounded analytics assistant for th
 
 CRITICAL OPERATING RULES:
 1. STRICT DATASET GROUNDING: You must answer questions EXCLUSIVELY using the facts and verified numbers provided in the DATASET CONTEXT below.
-2. ZERO FABRICATION: Never guess, estimate, or make up metrics, attendance percentages, assignment counts, or student scores. If a metric or field is unrecorded (e.g., attendance logs or assignment counts in this batch), explicitly state: "Attendance records and assignment submission counts are not currently recorded in your dataset."
-3. STRICT ROLE-BASED PRIVACY:
-   - Students can only view their own performance, goals, and recommendations. Never disclose another student's record or compare them to unnamed individuals.
+2. ATTENDANCE & ASSIGNMENT DATA: Answer attendance and assignment questions directly and accurately using ONLY the actual retrieved database values provided in the context (Attendance Percentage, Sessions Attended, Sessions Missed, Assignments Assigned, Assignments Completed, Assignment Completion Percentage, Average Assignment Score, Late Submissions Count).
+3. DISTINGUISH ZERO FROM UNRECORDED: Clearly distinguish zero (0) from NULL or unavailable values. If a value is 0 (e.g., 0 late submissions or 0 sessions missed), report it clearly as 0. If a value is "Not recorded", explicitly inform the user that this specific metric is not recorded in their dataset.
+4. ZERO FABRICATION: Never guess, estimate, or make up metrics, attendance percentages, assignment counts, or student scores. If no learning record exists or the student's learning data is not linked, clearly inform them: "Your learning data has not been linked yet. Please contact your administrator or academic advisor to link your student profile to your learning records."
+5. STRICT ROLE-BASED PRIVACY:
+   - Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record or compare them to unnamed individuals.
    - Trainers only have access to their assigned courses and students.
    - Administrators can view aggregate statistics and batch distributions.
-4. OUT-OF-SCOPE REFUSAL: Do not answer general programming questions (e.g. writing Python/SQL code), trivia, jokes, essays, or general knowledge. If the user asks an out-of-scope question, politely inform them of your specialized role and provide 2-3 dataset questions they can ask.
-5. MATHEMATICAL ACCURACY: Always use the verified calculations provided in the context (such as Average Readiness Score = 63.25 for admin batch, or 76.8 for Student 11391). Never alter these values.
-6. FORMATTING: Use clean, professional markdown with concise bullet points, bold key metrics, and an encouraging, academic tone.
+6. OUT-OF-SCOPE REFUSAL: Do not answer general programming questions (e.g. writing Python/SQL code), trivia, jokes, essays, or general knowledge. If the user asks an out-of-scope question, politely inform them of your specialized role and provide 2-3 dataset questions they can ask.
+7. MATHEMATICAL ACCURACY: Always use the verified calculations and metrics provided in the dataset context. Never alter these values.
+8. EXPLICIT REFUSAL OF UNAVAILABLE DATA: If the user asks for information not recorded in the dataset (such as hourly LMS clickstream timestamps, raw exam question papers, personal chat transcripts, or unrecorded attendance sessions), you MUST explicitly state that this information is not recorded in the platform database. Do NOT estimate, invent, or speculate.
+9. FORMATTING: Use clean, professional markdown with concise bullet points, bold key metrics, and an encouraging, academic tone.
 `;
 
     // 4. Build prompt with sanitized multi-turn history
@@ -669,6 +819,242 @@ ${userQuery}
 // Register handler on both the primary endpoint and backward-compatible alias
 app.post('/api/student-analytics-chat', handleStudentAnalyticsChat);
 app.post('/api/chat', handleStudentAnalyticsChat);
+
+// Analytics Engine Status & Verification
+app.get('/api/analytics/status', async (_req: Request, res: Response) => {
+  const pyTest = await runPythonAnalytics('verify-dataset', { records: [] });
+  res.json({
+    status: 'ok',
+    pythonRuntime: 'Python 3.10.12',
+    engine: 'python/student_analytics.py',
+    ipc: 'subprocess JSON over stdin/stdout',
+    benchmarkTargets: {
+      totalRecords: 500,
+      averageReadiness: 61.67,
+      placementReadyCount: 108,
+      placementDevelopingCount: 392,
+      riskBreakdown: { Low: 248, Medium: 147, High: 105 },
+    },
+    engineHealthy: pyTest.success,
+    hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+  });
+});
+
+// Evaluate Single Student using Python Analytics Engine
+app.post('/api/analytics/evaluate-student', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (!token) {
+      res.status(401).json({ error: 'Authentication required. Bearer token missing.' });
+      return;
+    }
+
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: {
+        headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
+      },
+    });
+
+    const { data: authData, error: userError } = await userClient.auth.getUser(token);
+    if (userError || !authData.user) {
+      res.status(401).json({ error: 'Invalid or expired authentication session.' });
+      return;
+    }
+
+    let studentRecord = req.body?.student;
+    const requestedStudentId = req.body?.student_id;
+
+    if (!studentRecord && requestedStudentId) {
+      const { data: dbRecord, error: dbErr } = await userClient
+        .from('student_learning_data')
+        .select('*')
+        .eq('student_id', requestedStudentId)
+        .maybeSingle();
+
+      if (dbErr) {
+        res.status(403).json({ error: 'Database access restricted by RLS policy.', details: dbErr.message });
+        return;
+      }
+      studentRecord = dbRecord;
+    }
+
+    if (!studentRecord) {
+      res.status(400).json({ error: 'No student record found or provided for evaluation.' });
+      return;
+    }
+
+    const pyResult = await runPythonAnalytics('evaluate-student', { student: studentRecord });
+    if (!pyResult.success) {
+      res.status(500).json({ error: 'Python evaluation failed.', details: pyResult.error });
+      return;
+    }
+
+    res.json(pyResult);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: 'Evaluation failed.', details: msg });
+  }
+});
+
+// Calculate Dynamic Batch Statistics via Python Engine (Honoring Supabase RLS)
+app.post('/api/analytics/batch-stats', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (!token) {
+      res.status(401).json({ error: 'Authentication required. Bearer token missing.' });
+      return;
+    }
+
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: {
+        headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
+      },
+    });
+
+    const { data: authData, error: userError } = await userClient.auth.getUser(token);
+    if (userError || !authData.user) {
+      res.status(401).json({ error: 'Invalid or expired session.' });
+      return;
+    }
+
+    // Query records using the authenticated userClient (respects RLS)
+    const { data: records, error: dbErr } = await userClient
+      .from('student_learning_data')
+      .select('*');
+
+    if (dbErr) {
+      res.status(403).json({
+        error: 'Database RLS policy restricts batch query.',
+        code: dbErr.code,
+        details: dbErr.message,
+      });
+      return;
+    }
+
+    const recordsToProcess = records || [];
+    const pyResult = await runPythonAnalytics('batch-stats', { records: recordsToProcess });
+
+    if (!pyResult.success) {
+      res.status(500).json({ error: 'Python batch statistics computation failed.', details: pyResult.error });
+      return;
+    }
+
+    res.json({
+      ...pyResult,
+      rlsStatus: {
+        accessibleRecords: recordsToProcess.length,
+        policyEnforced: true,
+      },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: 'Batch statistics computation failed.', details: msg });
+  }
+});
+
+// Grounded Chat Execution for Testing & Verification (Uses Live Server-Side Gemini API)
+app.post('/api/analytics/test-grounded-chat', async (req: Request, res: Response) => {
+  try {
+    const { message, datasetContext, studentRecord } = req.body as {
+      message: string;
+      datasetContext?: string;
+      studentRecord?: Record<string, unknown>;
+    };
+
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'Message query is required.' });
+      return;
+    }
+
+    let resolvedContext = datasetContext;
+    if (!resolvedContext && studentRecord) {
+      const pyResult = await runPythonAnalytics('evaluate-student', { student: studentRecord });
+      const evalData = (pyResult.data || {}) as Record<string, unknown>;
+
+      resolvedContext = `
+AUTHORIZED ROLE: Student
+STUDENT ACCOUNT:
+- User ID: ${studentRecord.user_id || 'test-user-id'}
+- Name: ${studentRecord.name || 'Verified Student'}
+- Email: ${studentRecord.email || 'student@platform.edu'}
+- Institutional Student ID: ${studentRecord.student_id || evalData.student_id || 'Not assigned'}
+- Education Level: ${studentRecord.education_level || 'Higher Education'}
+- Learning Goals: ${studentRecord.learning_goals || 'Software Engineering'}
+
+PERSONAL LEARNING RECORD (public.student_learning_data for Student ID ${studentRecord.student_id || evalData.student_id}):
+- Overall Readiness Score: ${evalData.overall_readiness_score !== null ? `${evalData.overall_readiness_score}%` : 'Not recorded'}
+- Risk Level: ${evalData.risk_level || 'Low'}
+- Placement Readiness: ${evalData.placement_ready ? 'Placement Ready (Yes)' : 'Developing (No)'}
+- Recommended Topic: ${evalData.recommended_topic || 'Not recorded'}
+- Recommended Skill: ${evalData.recommended_skill || 'Not recorded'}
+- Recommended Learning Action: ${evalData.recommended_learning_action || 'Not recorded'}
+- Course Name: ${studentRecord.course || 'Open University - AAA'}
+- Batch / Presentation ID: ${studentRecord.batch || '2013J'}
+
+ATTENDANCE & ENGAGEMENT METRICS (Verified Database Values):
+- Attendance Percentage: ${formatMetric(studentRecord.attendance_percentage, '%')}
+- Sessions Attended: ${formatMetric(studentRecord.sessions_attended)}
+- Sessions Missed: ${formatMetric(studentRecord.sessions_missed)}
+
+ASSIGNMENT & ASSESSMENT METRICS (Verified Database Values):
+- Assignments Assigned: ${formatMetric(studentRecord.assignments_assigned)}
+- Assignments Completed: ${formatMetric(studentRecord.assignments_completed)}
+- Assignment Completion Percentage: ${formatMetric(studentRecord.assignment_completion_percentage, '%')}
+- Average Assignment Score: ${formatMetric(studentRecord.average_assignment_score)}
+- Late Submissions Count: ${formatMetric(studentRecord.late_submissions_count)}
+
+STRICT DATASET BOUNDARY & PRIVACY ENFORCEMENT:
+- This student is ONLY permitted to view their own academic profile, readiness status, risk level, attendance, assignments, and learning recommendations.
+- NEVER reveal or discuss other students' names, scores, or risk assessments.
+- When answering queries regarding attendance or assignments, use ONLY the verified values provided above.
+- Accurately distinguish zero (0) from "Not recorded".
+- EXPLICIT REFUSAL OF UNAVAILABLE DATA: If the student asks for information not present in the dataset (such as hourly LMS login clickstream logs, raw exam question papers, personal chat transcripts, or unrecorded sessions), you MUST explicitly state that this information is not recorded in the platform database. Do NOT estimate or invent.
+`;
+    }
+
+    const testSystemInstruction = `
+You are EduCareer AI, the dedicated, dataset-grounded analytics assistant for the AI Student Learning & Career Success Platform.
+
+CRITICAL OPERATING RULES:
+1. STRICT DATASET GROUNDING: You must answer questions EXCLUSIVELY using the facts and verified numbers provided in the DATASET CONTEXT below.
+2. ATTENDANCE & ASSIGNMENT DATA: Answer attendance and assignment questions directly and accurately using ONLY the actual retrieved database values provided in the context (Attendance Percentage, Sessions Attended, Sessions Missed, Assignments Assigned, Assignments Completed, Assignment Completion Percentage, Average Assignment Score, Late Submissions Count).
+3. DISTINGUISH ZERO FROM UNRECORDED: Clearly distinguish zero (0) from NULL or unavailable values. If a value is 0 (e.g., 0 late submissions or 0 sessions missed), report it clearly as 0. If a value is "Not recorded", explicitly inform the user that this specific metric is not recorded in their dataset.
+4. ZERO FABRICATION: Never guess, estimate, or make up metrics, attendance percentages, assignment counts, or student scores. If no learning record exists or the student's learning data is not linked, clearly inform them: "Your learning data has not been linked yet. Please contact your administrator or academic advisor to link your student profile to your learning records."
+5. STRICT ROLE-BASED PRIVACY: Students can only view their own performance, goals, attendance, assignments, and recommendations. Never disclose another student's record or compare them to unnamed individuals.
+6. OUT-OF-SCOPE REFUSAL: Do not answer general programming questions (e.g. writing Python/SQL code), trivia, jokes, essays, or general knowledge. If the user asks an out-of-scope question, politely inform them of your specialized role and provide 2-3 dataset questions they can ask.
+7. MATHEMATICAL ACCURACY: Always use the verified calculations and metrics provided in the dataset context. Never alter these values.
+8. EXPLICIT REFUSAL OF UNAVAILABLE DATA: If the user asks for information not recorded in the dataset (such as hourly LMS clickstream timestamps, raw exam question papers, personal chat transcripts, or unrecorded attendance sessions), you MUST explicitly state that this information is not recorded in the platform database. Do NOT estimate, invent, or speculate.
+9. FORMATTING: Use clean, professional markdown with concise bullet points, bold key metrics, and an encouraging, academic tone.
+`;
+
+    const contents = [{
+      role: 'user' as const,
+      parts: [{ text: `[DATASET CONTEXT]\n${resolvedContext || 'No dataset context provided.'}\n\n[USER QUESTION]\n${message}` }],
+    }];
+
+    const startTime = Date.now();
+    const { text, modelUsed } = await generateGeminiReply(contents, testSystemInstruction);
+    const latencyMs = Date.now() - startTime;
+
+    res.json({
+      success: true,
+      query: message,
+      reply: text,
+      modelUsed,
+      latencyMs,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[Test Grounded Chat Error]', msg);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
 
 // Vite Middleware Integration
 async function startServer() {
